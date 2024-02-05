@@ -123,7 +123,7 @@ fn run_crds_dump_svc(
     );
     std::fs::create_dir_all(&dir)?;
     loop {
-        if !exit.load(Ordering::Relaxed) {
+        if exit.load(Ordering::Relaxed) {
             return Ok(());
         }
         dump_crds_table(&dir, cluster_info, start_time)?;
