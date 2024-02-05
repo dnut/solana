@@ -76,10 +76,12 @@ impl GossipService {
             should_check_duplicate_instance,
             exit.clone(),
         );
-        let t_gossip =
-            cluster_info
-                .clone()
-                .gossip(bank_forks, response_sender, gossip_validators, exit);
+        let t_gossip = cluster_info.clone().gossip(
+            bank_forks,
+            response_sender,
+            gossip_validators,
+            exit.clone(),
+        );
         let t_responder = streamer::responder(
             "Gossip",
             gossip_socket,
@@ -90,7 +92,7 @@ impl GossipService {
         let cluster_info = cluster_info.clone();
         Builder::new()
             .name("crds_dump".to_string())
-            .spawn(move || run_crds_dump_svc(&cluster_info).expect("crds dump"))
+            .spawn(move || run_crds_dump_svc(&cluster_info, &exit).expect("crds dump"))
             .unwrap();
         let thread_hdls = vec![
             t_receiver,
@@ -110,7 +112,10 @@ impl GossipService {
     }
 }
 
-fn run_crds_dump_svc(cluster_info: &ClusterInfo) -> Result<(), Box<dyn std::error::Error>> {
+fn run_crds_dump_svc(
+    cluster_info: &ClusterInfo,
+    exit: &AtomicBool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let start_time = SystemTime::now();
     let dir = format!(
         "crds-dumps/{}",
@@ -118,6 +123,9 @@ fn run_crds_dump_svc(cluster_info: &ClusterInfo) -> Result<(), Box<dyn std::erro
     );
     std::fs::create_dir_all(&dir)?;
     loop {
+        if !exit.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         dump_crds_table(&dir, cluster_info, start_time)?;
         std::thread::sleep(Duration::from_secs(10));
     }
