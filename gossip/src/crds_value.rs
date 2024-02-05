@@ -180,8 +180,14 @@ impl CrdsData {
     pub fn gossip_addr_string(&self) -> String {
         use CrdsData::*;
         match self {
-            LegacyContactInfo(x) => x.gossip().unwrap().to_string(),
-            ContactInfo(x) => x.gossip().unwrap().to_string(),
+            LegacyContactInfo(x) => match x.gossip() {
+                Ok(addr) => addr.to_string(),
+                Err(e) => format!("err:{e:?}"),
+            },
+            ContactInfo(x) => match x.gossip() {
+                Ok(addr) => addr.to_string(),
+                Err(e) => format!("err:{e:?}"),
+            },
             _ => String::new(),
         }
     }

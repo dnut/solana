@@ -25,7 +25,7 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc, RwLock,
         },
-        thread::{self, sleep, JoinHandle},
+        thread::{self, sleep, Builder, JoinHandle},
         time::{Duration, Instant, SystemTime},
     },
 };
@@ -88,8 +88,10 @@ impl GossipService {
             stats_reporter_sender,
         );
         let cluster_info = cluster_info.clone();
-        let t_crds_dump =
-            std::thread::spawn(move || run_crds_dump_svc(&cluster_info).expect("crds dump"));
+        let t_crds_dump = Builder::new()
+            .name("crds_dump".to_string())
+            .spawn(move || run_crds_dump_svc(&cluster_info).expect("crds dump"))
+            .unwrap();
         let thread_hdls = vec![
             t_receiver,
             t_responder,
