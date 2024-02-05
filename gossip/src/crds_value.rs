@@ -148,6 +148,44 @@ pub(crate) fn new_rand_timestamp<R: Rng>(rng: &mut R) -> u64 {
 }
 
 impl CrdsData {
+    pub fn variant_name(&self) -> &'static str {
+        use CrdsData::*;
+        match self {
+            LegacyContactInfo(_) => "LegacyContactInfo",
+            Vote(_, _) => "Vote",
+            LowestSlot(_, _) => "LowestSlot",
+            LegacySnapshotHashes(_) => "LegacySnapshotHashes",
+            AccountsHashes(_) => "AccountsHashes",
+            EpochSlots(_, _) => "EpochSlots",
+            LegacyVersion(_) => "LegacyVersion",
+            Version(_) => "Version",
+            NodeInstance(_) => "NodeInstance",
+            DuplicateShred(_, _) => "DuplicateShred",
+            SnapshotHashes(_) => "SnapshotHashes",
+            ContactInfo(_) => "ContactInfo",
+            RestartLastVotedForkSlots(_) => "RestartLastVotedForkSlots",
+            RestartHeaviestFork(_) => "RestartHeaviestFork",
+        }
+    }
+
+    pub fn shred_version_string(&self) -> String {
+        use CrdsData::*;
+        match self {
+            LegacyContactInfo(x) => x.shred_version().to_string(),
+            ContactInfo(x) => x.shred_version().to_string(),
+            _ => String::new(),
+        }
+    }
+
+    pub fn gossip_addr_string(&self) -> String {
+        use CrdsData::*;
+        match self {
+            LegacyContactInfo(x) => x.gossip().unwrap().to_string(),
+            ContactInfo(x) => x.gossip().unwrap().to_string(),
+            _ => String::new(),
+        }
+    }
+
     /// New random CrdsData for tests and benchmarks.
     fn new_rand<R: Rng>(rng: &mut R, pubkey: Option<Pubkey>) -> CrdsData {
         let kind = rng.gen_range(0..9);

@@ -67,7 +67,7 @@ const SIGNATURE_SAMPLE_LEADING_ZEROS: u32 = 19;
 
 pub struct Crds {
     /// Stores the map of labels and values
-    table: IndexMap<CrdsValueLabel, VersionedCrdsValue>,
+    pub table: IndexMap<CrdsValueLabel, VersionedCrdsValue>,
     cursor: Cursor, // Next insert ordinal location.
     shards: CrdsShards,
     nodes: IndexSet<usize>, // Indices of nodes' ContactInfo.

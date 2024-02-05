@@ -3,6 +3,7 @@
 use {
     crate::{cluster_info::ClusterInfo, legacy_contact_info::LegacyContactInfo as ContactInfo},
     crossbeam_channel::{unbounded, Sender},
+    itertools::Itertools,
     rand::{thread_rng, Rng},
     solana_client::{connection_cache::ConnectionCache, thin_client::ThinClient},
     solana_perf::recycler::Recycler,
@@ -17,13 +18,15 @@ use {
     },
     std::{
         collections::HashSet,
+        fs::File,
+        io::Write,
         net::{SocketAddr, TcpListener, UdpSocket},
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc, RwLock,
         },
         thread::{self, sleep, JoinHandle},
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime},
     },
 };
 
@@ -84,12 +87,16 @@ impl GossipService {
             socket_addr_space,
             stats_reporter_sender,
         );
+        let cluster_info = cluster_info.clone();
+        let t_crds_dump =
+            std::thread::spawn(move || run_crds_dump_svc(&cluster_info).expect("crds dump"));
         let thread_hdls = vec![
             t_receiver,
             t_responder,
             t_socket_consume,
             t_listen,
             t_gossip,
+            t_crds_dump,
         ];
         Self { thread_hdls }
     }
@@ -100,6 +107,53 @@ impl GossipService {
         }
         Ok(())
     }
+}
+
+fn run_crds_dump_svc(cluster_info: &ClusterInfo) -> Result<(), Box<dyn std::error::Error>> {
+    let start_time = SystemTime::now();
+    let dir = format!(
+        "crds-dumps/{}",
+        start_time.duration_since(SystemTime::UNIX_EPOCH)?.as_secs()
+    );
+    std::fs::create_dir_all(&dir)?;
+    loop {
+        dump_crds_table(&dir, cluster_info, start_time)?;
+        std::thread::sleep(Duration::from_secs(10));
+    }
+}
+
+fn dump_crds_table(
+    dir: &str,
+    cluster_info: &ClusterInfo,
+    start_time: SystemTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let crds = cluster_info.gossip.crds.read().unwrap();
+    let now = SystemTime::now();
+    let csv_str = crds
+        .table
+        .values()
+        .map(|value| {
+            format!(
+                "{},{},{},{},{},{}\n",
+                value.value.data.variant_name(),
+                value.value.pubkey(),
+                value.value_hash,
+                value.value.wallclock(),
+                value.value.data.gossip_addr_string(),
+                value.value.data.shred_version_string(),
+            )
+        })
+        .sorted()
+        .join("");
+    let mut file = File::create(format!(
+        "{dir}/crds-dump-{}.csv",
+        now.duration_since(SystemTime::UNIX_EPOCH)?.as_secs(),
+    ))?;
+    file.write_all("message_type,pubkey,hash,wallclock,gossip_addr,shred_version\n".as_bytes())?;
+    file.write_all(csv_str.as_bytes())?;
+    let timer = now.duration_since(start_time)?;
+    println!("{} - CRDS LEN: {}", timer.as_secs(), crds.len());
+    Ok(())
 }
 
 /// Discover Validators in a cluster
