@@ -6,11 +6,7 @@ use {
         },
         accounts_index::{IndexKey, ScanConfig, ScanError, ScanResult, ZeroLamport},
         ancestors::Ancestors,
-        nonce_info::{NonceFull, NonceInfo},
-        rent_collector::RentCollector,
-        rent_debits::RentDebits,
         storable_accounts::StorableAccounts,
-        transaction_results::TransactionExecutionResult,
     },
     dashmap::DashMap,
     log::*,
@@ -24,10 +20,14 @@ use {
             state::{DurableNonce, Versions as NonceVersions},
             State as NonceState,
         },
+        nonce_info::{NonceFull, NonceInfo},
         pubkey::Pubkey,
         slot_hashes::SlotHashes,
         transaction::{Result, SanitizedTransaction, TransactionAccountLocks, TransactionError},
-        transaction_context::{IndexOfAccount, TransactionAccount},
+        transaction_context::TransactionAccount,
+    },
+    solana_svm::{
+        account_loader::TransactionLoadResult, transaction_results::TransactionExecutionResult,
     },
     std::{
         cmp::Reverse,
@@ -98,19 +98,6 @@ pub struct Accounts {
     /// being processed by banking/replay threads
     pub(crate) account_locks: Mutex<AccountLocks>,
 }
-
-// for the load instructions
-pub type TransactionRent = u64;
-pub type TransactionProgramIndices = Vec<Vec<IndexOfAccount>>;
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub struct LoadedTransaction {
-    pub accounts: Vec<TransactionAccount>,
-    pub program_indices: TransactionProgramIndices,
-    pub rent: TransactionRent,
-    pub rent_debits: RentDebits,
-}
-
-pub type TransactionLoadResult = (Result<LoadedTransaction>, Option<NonceFull>);
 
 pub enum AccountAddressFilter {
     Exclude, // exclude all addresses matching the filter
@@ -655,18 +642,11 @@ impl Accounts {
         txs: &[SanitizedTransaction],
         res: &[TransactionExecutionResult],
         loaded: &mut [TransactionLoadResult],
-        rent_collector: &RentCollector,
         durable_nonce: &DurableNonce,
         lamports_per_signature: u64,
     ) {
-        let (accounts_to_store, transactions) = self.collect_accounts_to_store(
-            txs,
-            res,
-            loaded,
-            rent_collector,
-            durable_nonce,
-            lamports_per_signature,
-        );
+        let (accounts_to_store, transactions) =
+            self.collect_accounts_to_store(txs, res, loaded, durable_nonce, lamports_per_signature);
         self.accounts_db
             .store_cached_inline_update_index((slot, &accounts_to_store[..]), Some(&transactions));
     }
@@ -689,7 +669,6 @@ impl Accounts {
         txs: &'a [SanitizedTransaction],
         execution_results: &'a [TransactionExecutionResult],
         load_results: &'a mut [TransactionLoadResult],
-        _rent_collector: &RentCollector,
         durable_nonce: &DurableNonce,
         lamports_per_signature: u64,
     ) -> (
@@ -813,10 +792,6 @@ fn prepare_if_nonce_account(
 mod tests {
     use {
         super::*,
-        crate::{
-            rent_collector::RentCollector,
-            transaction_results::{DurableNonceFee, TransactionExecutionDetails},
-        },
         assert_matches::assert_matches,
         solana_program_runtime::loaded_programs::LoadedProgramsForTxBatch,
         solana_sdk::{
@@ -826,9 +801,14 @@ mod tests {
             instruction::{CompiledInstruction, InstructionError},
             message::{Message, MessageHeader},
             native_loader, nonce, nonce_account,
+            rent_debits::RentDebits,
             signature::{keypair_from_seed, signers::Signers, Keypair, Signer},
             system_instruction, system_program,
             transaction::{Transaction, MAX_TX_ACCOUNT_LOCKS},
+        },
+        solana_svm::{
+            account_loader::LoadedTransaction,
+            transaction_results::{DurableNonceFee, TransactionExecutionDetails},
         },
         std::{
             borrow::Cow,
@@ -1512,8 +1492,6 @@ mod tests {
         let account1 = AccountSharedData::new(2, 0, &Pubkey::default());
         let account2 = AccountSharedData::new(3, 0, &Pubkey::default());
 
-        let rent_collector = RentCollector::default();
-
         let instructions = vec![CompiledInstruction::new(2, &(), vec![0, 1])];
         let message = Message::new_with_compiled_instructions(
             1,
@@ -1581,7 +1559,6 @@ mod tests {
             &txs,
             &execution_results,
             loaded.as_mut_slice(),
-            &rent_collector,
             &DurableNonce::default(),
             0,
         );
@@ -1884,8 +1861,6 @@ mod tests {
 
     #[test]
     fn test_nonced_failure_accounts_rollback_from_pays() {
-        let rent_collector = RentCollector::default();
-
         let nonce_address = Pubkey::new_unique();
         let nonce_authority = keypair_from_seed(&[0; 32]).unwrap();
         let from = keypair_from_seed(&[1; 32]).unwrap();
@@ -1962,7 +1937,6 @@ mod tests {
             &txs,
             &execution_results,
             loaded.as_mut_slice(),
-            &rent_collector,
             &durable_nonce,
             0,
         );
@@ -1994,8 +1968,6 @@ mod tests {
 
     #[test]
     fn test_nonced_failure_accounts_rollback_nonce_pays() {
-        let rent_collector = RentCollector::default();
-
         let nonce_authority = keypair_from_seed(&[0; 32]).unwrap();
         let nonce_address = nonce_authority.pubkey();
         let from = keypair_from_seed(&[1; 32]).unwrap();
@@ -2071,7 +2043,6 @@ mod tests {
             &txs,
             &execution_results,
             loaded.as_mut_slice(),
-            &rent_collector,
             &durable_nonce,
             0,
         );

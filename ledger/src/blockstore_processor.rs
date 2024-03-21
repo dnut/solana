@@ -20,10 +20,6 @@ use {
         accounts_index::AccountSecondaryIndexes,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         epoch_accounts_hash::EpochAccountsHash,
-        rent_debits::RentDebits,
-        transaction_results::{
-            TransactionExecutionDetails, TransactionExecutionResult, TransactionResults,
-        },
     },
     solana_cost_model::cost_model::CostModel,
     solana_entry::entry::{
@@ -41,7 +37,6 @@ use {
         commitment::VOTE_THRESHOLD_SIZE,
         installed_scheduler_pool::BankWithScheduler,
         prioritization_fee_cache::PrioritizationFeeCache,
-        runtime_config::RuntimeConfig,
         transaction_batch::TransactionBatch,
     },
     solana_sdk::{
@@ -50,12 +45,19 @@ use {
         genesis_config::GenesisConfig,
         hash::Hash,
         pubkey::Pubkey,
+        rent_debits::RentDebits,
         saturating_add_assign,
         signature::{Keypair, Signature},
         timing,
         transaction::{
             Result, SanitizedTransaction, TransactionError, TransactionVerificationMode,
             VersionedTransaction,
+        },
+    },
+    solana_svm::{
+        runtime_config::RuntimeConfig,
+        transaction_results::{
+            TransactionExecutionDetails, TransactionExecutionResult, TransactionResults,
         },
     },
     solana_transaction_status::token_balances::TransactionTokenBalancesSet,
@@ -674,8 +676,9 @@ pub enum BlockstoreProcessorError {
     RootBankWithMismatchedCapitalization(Slot),
 }
 
-/// Callback for accessing bank state while processing the blockstore
-pub type ProcessCallback = Arc<dyn Fn(&Bank) + Sync + Send>;
+/// Callback for accessing bank state after each slot is confirmed while
+/// processing the blockstore
+pub type ProcessSlotCallback = Arc<dyn Fn(&Bank) + Sync + Send>;
 
 #[derive(Default, Clone)]
 pub struct ProcessOptions {
@@ -683,6 +686,7 @@ pub struct ProcessOptions {
     pub run_verification: bool,
     pub full_leader_cache: bool,
     pub halt_at_slot: Option<Slot>,
+    pub slot_callback: Option<ProcessSlotCallback>,
     pub new_hard_forks: Option<Vec<Slot>>,
     pub debug_keys: Option<Arc<HashSet<Pubkey>>>,
     pub account_indexes: AccountSecondaryIndexes,
@@ -744,7 +748,6 @@ pub fn test_process_blockstore(
         genesis_config,
         blockstore,
         Vec::new(),
-        None,
         None,
         opts,
         None,
@@ -1809,6 +1812,11 @@ fn process_single_slot(
         result?
     }
     bank.freeze(); // all banks handled by this routine are created from complete slots
+
+    if let Some(slot_callback) = &opts.slot_callback {
+        slot_callback(bank);
+    }
+
     if blockstore.is_primary_access() {
         blockstore.insert_bank_hash(bank.slot(), bank.hash(), false);
     }

@@ -11,7 +11,10 @@ use {
             TieredStorageResult,
         },
     },
-    solana_sdk::{account::ReadableAccount, pubkey::Pubkey, stake_history::Epoch},
+    solana_sdk::{
+        account::ReadableAccount, pubkey::Pubkey, rent_collector::RENT_EXEMPT_RENT_EPOCH,
+        stake_history::Epoch,
+    },
     std::path::Path,
 };
 
@@ -25,7 +28,7 @@ pub struct TieredReadableAccount<'accounts_file, M: TieredAccountMeta> {
     /// The address of the account owner
     pub owner: &'accounts_file Pubkey,
     /// The index for accessing the account inside its belonging AccountsFile
-    pub index: usize,
+    pub index: IndexOffset,
     /// The account block that contains this account.  Note that this account
     /// block may be shared with other accounts.
     pub account_block: &'accounts_file [u8],
@@ -43,7 +46,7 @@ impl<'accounts_file, M: TieredAccountMeta> TieredReadableAccount<'accounts_file,
     }
 
     /// Returns the index to this account in its AccountsFile.
-    pub fn index(&self) -> usize {
+    pub fn index(&self) -> IndexOffset {
         self.index
     }
 
@@ -72,12 +75,23 @@ impl<'accounts_file, M: TieredAccountMeta> ReadableAccount
     }
 
     /// Returns the epoch that this account will next owe rent by parsing
-    /// the specified account block.  Epoch::MAX will be returned if the account
-    /// is rent-exempt.
+    /// the specified account block.  RENT_EXEMPT_RENT_EPOCH will be returned
+    /// if the account is rent-exempt.
+    ///
+    /// For a zero-lamport account, Epoch::default() will be returned to
+    /// default states of an AccountSharedData.
     fn rent_epoch(&self) -> Epoch {
         self.meta
             .rent_epoch(self.account_block)
-            .unwrap_or(Epoch::MAX)
+            .unwrap_or(if self.lamports() != 0 {
+                RENT_EXEMPT_RENT_EPOCH
+            } else {
+                // While there is no valid-values for any fields of a zero
+                // lamport account, here we return Epoch::default() to
+                // match the default states of AccountSharedData.  Otherwise,
+                // a hash mismatch will occur.
+                Epoch::default()
+            })
     }
 
     /// Returns the data associated to this account.
@@ -118,10 +132,10 @@ impl TieredStorageReader {
     /// Returns the account located at the specified index offset.
     pub fn get_account(
         &self,
-        index_offset: u32,
-    ) -> TieredStorageResult<Option<(StoredAccountMeta<'_>, usize)>> {
+        index_offset: IndexOffset,
+    ) -> TieredStorageResult<Option<(StoredAccountMeta<'_>, IndexOffset)>> {
         match self {
-            Self::Hot(hot) => hot.get_account(IndexOffset(index_offset)),
+            Self::Hot(hot) => hot.get_account(index_offset),
         }
     }
 
@@ -136,16 +150,27 @@ impl TieredStorageReader {
     /// causes a data overrun.
     pub fn account_matches_owners(
         &self,
-        index_offset: u32,
+        index_offset: IndexOffset,
         owners: &[Pubkey],
     ) -> Result<usize, MatchAccountOwnerError> {
         match self {
             Self::Hot(hot) => {
                 let account_offset = hot
-                    .get_account_offset(IndexOffset(index_offset))
+                    .get_account_offset(index_offset)
                     .map_err(|_| MatchAccountOwnerError::UnableToLoad)?;
                 hot.account_matches_owners(account_offset, owners)
             }
+        }
+    }
+
+    /// Return a vector of account metadata for each account, starting from
+    /// `index_offset`
+    pub fn accounts(
+        &self,
+        index_offset: IndexOffset,
+    ) -> TieredStorageResult<Vec<StoredAccountMeta>> {
+        match self {
+            Self::Hot(hot) => hot.accounts(index_offset),
         }
     }
 }

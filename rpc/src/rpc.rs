@@ -7,7 +7,7 @@ use {
     base64::{prelude::BASE64_STANDARD, Engine},
     bincode::{config::Options, serialize},
     crossbeam_channel::{unbounded, Receiver, Sender},
-    jsonrpc_core::{futures::future, types::error, BoxFuture, Error, ErrorCode, Metadata, Result},
+    jsonrpc_core::{futures::future, types::error, BoxFuture, Error, Metadata, Result},
     jsonrpc_derive::rpc,
     solana_account_decoder::{
         parse_token::{is_known_spl_token_id, token_amount_to_ui_amount, UiTokenAmount},
@@ -62,10 +62,6 @@ use {
         clock::{Slot, UnixTimestamp, MAX_RECENT_BLOCKHASHES},
         commitment_config::{CommitmentConfig, CommitmentLevel},
         epoch_info::EpochInfo,
-        epoch_rewards_hasher::EpochRewardsHasher,
-        epoch_rewards_partition_data::{
-            get_epoch_rewards_partition_data_address, EpochRewardsPartitionDataVersion,
-        },
         epoch_schedule::EpochSchedule,
         exit::Exit,
         feature_set,
@@ -104,8 +100,8 @@ use {
     },
     std::{
         any::type_name,
-        cmp::{max, min},
-        collections::{HashMap, HashSet},
+        cmp::{max, min, Reverse},
+        collections::{BinaryHeap, HashMap, HashSet},
         convert::TryFrom,
         net::SocketAddr,
         str::FromStr,
@@ -523,38 +519,6 @@ impl JsonRpcRequestProcessor {
         })
     }
 
-    async fn get_reward_map<F>(
-        &self,
-        slot: Slot,
-        addresses: &[String],
-        reward_type_filter: &F,
-        config: &RpcEpochConfig,
-    ) -> Result<HashMap<String, (Reward, Slot)>>
-    where
-        F: Fn(RewardType) -> bool,
-    {
-        let Ok(Some(block)) = self
-            .get_block(
-                slot,
-                Some(RpcBlockConfig::rewards_with_commitment(config.commitment).into()),
-            )
-            .await
-        else {
-            return Err(RpcCustomError::BlockNotAvailable { slot }.into());
-        };
-
-        Ok(block
-            .rewards
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|reward| {
-                reward.reward_type.is_some_and(reward_type_filter)
-                    && addresses.contains(&reward.pubkey)
-            })
-            .map(|reward| (reward.clone().pubkey, (reward, slot)))
-            .collect())
-    }
-
     pub async fn get_inflation_reward(
         &self,
         addresses: Vec<Pubkey>,
@@ -563,20 +527,18 @@ impl JsonRpcRequestProcessor {
         let config = config.unwrap_or_default();
         let epoch_schedule = self.get_epoch_schedule();
         let first_available_block = self.get_first_available_block().await;
-        let slot_context = RpcContextConfig {
-            commitment: config.commitment,
-            min_context_slot: config.min_context_slot,
-        };
         let epoch = match config.epoch {
             Some(epoch) => epoch,
             None => epoch_schedule
-                .get_epoch(self.get_slot(slot_context)?)
+                .get_epoch(self.get_slot(RpcContextConfig {
+                    commitment: config.commitment,
+                    min_context_slot: config.min_context_slot,
+                })?)
                 .saturating_sub(1),
         };
-        // Rewards for this epoch are found in the first confirmed block of the next epoch
-        let rewards_epoch = epoch.saturating_add(1);
-        let first_slot_in_epoch = epoch_schedule.get_first_slot_in_epoch(rewards_epoch);
 
+        // Rewards for this epoch are found in the first confirmed block of the next epoch
+        let first_slot_in_epoch = epoch_schedule.get_first_slot_in_epoch(epoch.saturating_add(1));
         if first_slot_in_epoch < first_available_block {
             if self.bigtable_ledger_storage.is_some() {
                 return Err(RpcCustomError::LongTermStorageSlotSkipped {
@@ -592,8 +554,6 @@ impl JsonRpcRequestProcessor {
             }
         }
 
-        let bank = self.get_bank_with_config(slot_context)?;
-
         let first_confirmed_block_in_epoch = *self
             .get_blocks_with_limit(first_slot_in_epoch, 1, config.commitment)
             .await?
@@ -601,94 +561,44 @@ impl JsonRpcRequestProcessor {
             .ok_or(RpcCustomError::BlockNotAvailable {
                 slot: first_slot_in_epoch,
             })?;
-        let partitioned_epoch_reward_enabled_slot = bank
-            .feature_set
-            .activated_slot(&feature_set::enable_partitioned_epoch_reward::id());
-        let partitioned_epoch_reward_enabled = partitioned_epoch_reward_enabled_slot
-            .map(|slot| slot <= first_confirmed_block_in_epoch)
-            .unwrap_or(false);
 
-        let mut reward_map: HashMap<String, (Reward, Slot)> = {
-            let addresses: Vec<String> =
-                addresses.iter().map(|pubkey| pubkey.to_string()).collect();
-
-            self.get_reward_map(
+        let Ok(Some(first_confirmed_block)) = self
+            .get_block(
                 first_confirmed_block_in_epoch,
-                &addresses,
-                &|reward_type| -> bool {
-                    reward_type == RewardType::Voting
-                        || (!partitioned_epoch_reward_enabled && reward_type == RewardType::Staking)
-                },
-                &config,
+                Some(RpcBlockConfig::rewards_with_commitment(config.commitment).into()),
             )
-            .await?
+            .await
+        else {
+            return Err(RpcCustomError::BlockNotAvailable {
+                slot: first_confirmed_block_in_epoch,
+            }
+            .into());
         };
 
-        if partitioned_epoch_reward_enabled {
-            let partition_data_address = get_epoch_rewards_partition_data_address(rewards_epoch);
-            let partition_data_account =
-                bank.get_account(&partition_data_address)
-                    .ok_or_else(|| Error {
-                        code: ErrorCode::InternalError,
-                        message: format!(
-                            "Partition data account not found for epoch {:?} at {:?}",
-                            epoch, partition_data_address
-                        ),
-                        data: None,
-                    })?;
-            let EpochRewardsPartitionDataVersion::V0(partition_data) =
-                bincode::deserialize(partition_data_account.data())
-                    .map_err(|_| Error::internal_error())?;
-            let hasher = EpochRewardsHasher::new(
-                partition_data.num_partitions,
-                &partition_data.parent_blockhash,
-            );
-            let mut partition_index_addresses: HashMap<usize, Vec<String>> = HashMap::new();
-            for address in addresses.iter() {
-                let address_string = address.to_string();
-                // Skip this address if (Voting) rewards were already found in
-                // the first block of the epoch
-                if !reward_map.contains_key(&address_string) {
-                    let partition_index = hasher.clone().hash_address_to_partition(address);
-                    partition_index_addresses
-                        .entry(partition_index)
-                        .and_modify(|list| list.push(address_string.clone()))
-                        .or_insert(vec![address_string]);
-                }
-            }
+        let addresses: Vec<String> = addresses
+            .into_iter()
+            .map(|pubkey| pubkey.to_string())
+            .collect();
 
-            let block_list = self
-                .get_blocks_with_limit(
-                    first_confirmed_block_in_epoch + 1,
-                    partition_data.num_partitions,
-                    config.commitment,
-                )
-                .await?;
-
-            for (partition_index, addresses) in partition_index_addresses.iter() {
-                let slot = *block_list
-                    .get(*partition_index)
-                    .ok_or_else(Error::internal_error)?;
-
-                let index_reward_map = self
-                    .get_reward_map(
-                        slot,
-                        addresses,
-                        &|reward_type| -> bool { reward_type == RewardType::Staking },
-                        &config,
-                    )
-                    .await?;
-                reward_map.extend(index_reward_map);
-            }
-        }
+        let reward_hash: HashMap<String, Reward> = first_confirmed_block
+            .rewards
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|reward| match reward.reward_type? {
+                RewardType::Staking | RewardType::Voting => addresses
+                    .contains(&reward.pubkey)
+                    .then(|| (reward.clone().pubkey, reward)),
+                _ => None,
+            })
+            .collect();
 
         let rewards = addresses
             .iter()
             .map(|address| {
-                if let Some((reward, slot)) = reward_map.get(&address.to_string()) {
+                if let Some(reward) = reward_hash.get(address) {
                     return Some(RpcInflationReward {
                         epoch,
-                        effective_slot: *slot,
+                        effective_slot: first_confirmed_block_in_epoch,
                         amount: reward.lamports.unsigned_abs(),
                         post_balance: reward.post_balance,
                         commission: reward.commission,
@@ -697,6 +607,7 @@ impl JsonRpcRequestProcessor {
                 None
             })
             .collect();
+
         Ok(rewards)
     }
 
@@ -1950,29 +1861,38 @@ impl JsonRpcRequestProcessor {
                 "Invalid param: not a Token mint".to_string(),
             ));
         }
-        let mut token_balances: Vec<RpcTokenAccountBalance> = self
-            .get_filtered_spl_token_accounts_by_mint(&bank, &mint_owner, mint, vec![])?
-            .into_iter()
-            .map(|(address, account)| {
-                let amount = StateWithExtensions::<TokenAccount>::unpack(account.data())
-                    .map(|account| account.base.amount)
-                    .unwrap_or(0);
-                let amount = token_amount_to_ui_amount(amount, decimals);
-                RpcTokenAccountBalance {
-                    address: address.to_string(),
-                    amount,
+
+        let mut token_balances =
+            BinaryHeap::<Reverse<(u64, Pubkey)>>::with_capacity(NUM_LARGEST_ACCOUNTS);
+        for (address, account) in
+            self.get_filtered_spl_token_accounts_by_mint(&bank, &mint_owner, mint, vec![])?
+        {
+            let amount = StateWithExtensions::<TokenAccount>::unpack(account.data())
+                .map(|account| account.base.amount)
+                .unwrap_or(0);
+
+            let new_entry = (amount, address);
+            if token_balances.len() >= NUM_LARGEST_ACCOUNTS {
+                let Reverse(entry) = token_balances
+                    .peek()
+                    .expect("BinaryHeap::peek should succeed when len > 0");
+                if *entry >= new_entry {
+                    continue;
                 }
+                token_balances.pop();
+            }
+            token_balances.push(Reverse(new_entry));
+        }
+
+        let token_balances = token_balances
+            .into_sorted_vec()
+            .into_iter()
+            .map(|Reverse((amount, address))| RpcTokenAccountBalance {
+                address: address.to_string(),
+                amount: token_amount_to_ui_amount(amount, decimals),
             })
             .collect();
-        token_balances.sort_by(|a, b| {
-            a.amount
-                .amount
-                .parse::<u64>()
-                .unwrap()
-                .cmp(&b.amount.amount.parse::<u64>().unwrap())
-                .reverse()
-        });
-        token_balances.truncate(NUM_LARGEST_ACCOUNTS);
+
         Ok(new_response(&bank, token_balances))
     }
 
@@ -5150,7 +5070,7 @@ pub mod tests {
             let prioritization_fee_cache = &self.meta.prioritization_fee_cache;
             let transactions: Vec<_> = transactions
                 .into_iter()
-                .map(|tx| SanitizedTransaction::try_from_legacy_transaction(tx).unwrap())
+                .map(SanitizedTransaction::from_transaction_for_tests)
                 .collect();
             prioritization_fee_cache.update(&bank, transactions.iter());
         }
