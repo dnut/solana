@@ -27,9 +27,9 @@ pub struct Ping<T> {
 
 #[derive(AbiExample, Debug, Deserialize, Serialize)]
 pub struct Pong {
-    from: Pubkey,
-    hash: Hash, // Hash of received ping token.
-    signature: Signature,
+    pub from: Pubkey,
+    pub hash: Hash, // Hash of received ping token.
+    pub signature: Signature,
 }
 
 /// Maintains records of remote nodes which have returned a valid response to a

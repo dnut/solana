@@ -192,13 +192,151 @@ struct ServeRepairStats {
     err_id_mismatch: usize,
 }
 
-#[derive(Debug, AbiExample, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, AbiExample, Deserialize, Serialize)]
 pub struct RepairRequestHeader {
     signature: Signature,
     sender: Pubkey,
     recipient: Pubkey,
     timestamp: u64,
     nonce: Nonce,
+}
+
+// #[test]
+// fn asd() {
+//     let header = RepairRequestHeader {
+//         signature: Signature::new(&[
+//             192, 86, 218, 156, 168, 139, 216, 200, 30, 181, 244, 121, 90, 41, 177, 117, 55, 40,
+//             199, 207, 62, 118, 56, 134, 73, 88, 74, 2, 139, 189, 201, 150, 22, 75, 239, 15, 35,
+//             125, 154, 130, 165, 120, 24, 154, 159, 42, 222, 92, 189, 252, 136, 151, 184, 96, 137,
+//             169, 181, 62, 108, 82, 235, 143, 42, 93,
+//         ]),
+//         sender: Pubkey::from([
+//             212, 223, 9, 217, 201, 202, 143, 14, 99, 140, 33, 48, 241, 185, 240, 10, 146, 127, 62,
+//             122, 247, 66, 91, 169, 32, 251, 220, 5, 197, 184, 172, 190,
+//         ]),
+//         recipient: Pubkey::from([
+//             182, 248, 69, 46, 30, 121, 156, 153, 238, 91, 192, 207, 163, 187, 60, 71, 60, 232, 71,
+//             228, 195, 225, 162, 193, 230, 37, 128, 114, 73, 252, 29, 20,
+//         ]),
+//         timestamp: 6297903785341370276,
+//         nonce: 4279516118,
+//     };
+//     let msg = RepairProtocol::AncestorHashes {
+//         header,
+//         slot: 7146475522702884370,
+//     };
+//     let data = bincode::serialize(&msg).unwrap();
+//     println!("{data:?}");
+// }
+
+#[test]
+fn asd() {
+    let msg = RepairProtocol::Pong(Pong {
+        from: Pubkey::from([
+            252, 143, 181, 36, 240, 87, 69, 104, 157, 159, 242, 94, 101, 48, 187, 120, 173, 241,
+            68, 167, 217, 67, 141, 46, 105, 85, 179, 69, 249, 140, 6, 145,
+        ]),
+        hash: Hash::from([
+            6, 201, 32, 10, 11, 24, 157, 240, 245, 65, 91, 80, 255, 89, 18, 136, 27, 80, 101, 106,
+            118, 175, 154, 105, 205, 69, 2, 112, 61, 168, 217, 197,
+        ]),
+        signature: Signature::new(&[
+            251, 212, 16, 137, 153, 40, 116, 229, 235, 90, 12, 54, 76, 123, 187, 108, 132, 78, 151,
+            13, 47, 0, 127, 182, 158, 5, 19, 226, 204, 0, 120, 218, 175, 155, 122, 155, 94, 44,
+            198, 119, 196, 127, 121, 242, 98, 87, 235, 233, 241, 57, 53, 125, 88, 67, 4, 23, 164,
+            128, 221, 124, 139, 84, 106, 7,
+        ]),
+    });
+    let data = bincode::serialize(&msg).unwrap();
+    println!("{data:?}");
+}
+
+#[test]
+fn asd2() {
+    let repair_request = ShredRepairType::Orphan(12469263651305609919);
+    let keypair = Keypair::from_bytes(&[
+        25, 140, 102, 72, 215, 173, 220, 250, 193, 221, 127, 93, 118, 70, 175, 44, 92, 41, 165, 5,
+        36, 43, 210, 205, 79, 44, 202, 138, 108, 172, 109, 217, 219, 2, 96, 190, 50, 68, 206, 251,
+        25, 237, 138, 247, 192, 64, 225, 129, 240, 160, 96, 157, 57, 134, 92, 204, 95, 67, 188,
+        176, 38, 11, 117, 44,
+    ])
+    .unwrap();
+    let repair_peer_id = Pubkey::from([
+        58, 128, 112, 179, 116, 175, 12, 91, 255, 85, 220, 200, 113, 120, 157, 158, 34, 77, 111,
+        158, 209, 7, 223, 7, 23, 88, 139, 104, 7, 151, 59, 211,
+    ]);
+    // let timestamp = 17001853122040668618; // you'll need to stub out the timestamp function to provide this input
+    let nonce = 1937495194;
+
+    // let data = bincode::serialize(&msg).unwrap();
+
+    let serve_repair = ServeRepair::new(
+        Arc::new(ClusterInfo::new(
+            solana_gossip::contact_info::ContactInfo::new(keypair.pubkey(), 0, 0),
+            Arc::new(keypair.insecure_clone()),
+            SocketAddrSpace::Unspecified,
+        )),
+        BankForks::new_rw_arc(solana_runtime::bank::Bank::default_for_tests()),
+        Arc::new(RwLock::new(HashSet::new())),
+    );
+    let data = serve_repair
+        .map_repair_request(
+            &repair_request,
+            &repair_peer_id,
+            &mut RepairStats::default(),
+            nonce,
+            &keypair,
+        )
+        .unwrap();
+
+    println!("{data:?}");
+}
+
+#[test]
+fn asdafs() {
+    let axcad = [
+        147, 108, 168, 40, 77, 30, 53, 165, 108, 220, 222, 16, 220, 149, 246, 48, 251, 30, 8, 75,
+        208, 30, 227, 24, 60, 251, 76, 24, 148, 76, 119, 65, 127, 239, 91, 86, 91, 54, 222, 240,
+        38, 91, 184, 224, 253, 151, 153, 216, 83, 109, 67, 53, 7, 227, 57, 33, 217, 144, 196, 90,
+        201, 204, 114, 2,
+    ];
+    let from_keypair_sign = [
+        10, 0, 0, 0, 31, 100, 50, 165, 192, 81, 156, 250, 75, 168, 240, 164, 179, 138, 232, 43,
+        211, 93, 167, 63, 27, 38, 19, 165, 202, 23, 225, 56, 227, 217, 82, 100, 242, 31, 16, 138,
+        29, 219, 48, 15, 10, 29, 139, 129, 162, 233, 150, 99, 230, 57, 187, 16, 21, 116, 99, 236,
+        147, 129, 30, 51, 42, 89, 16, 4, 202, 161, 153, 182, 85, 183, 242, 235, 154, 212, 123, 115,
+        191, 218, 194, 210, 57, 185, 11, 173, 57, 134, 92, 204, 95, 67, 188, 176, 38, 11, 117, 44,
+        58, 128, 112, 179, 116, 175, 12, 91, 255, 85, 220, 200, 113, 120, 157, 158, 34, 77, 111,
+        158, 209, 7, 223, 7, 23, 88, 139, 104, 7, 151, 59, 211, 202, 161, 153, 182, 85, 183, 242,
+        235, 154, 212, 123, 115, 191, 218, 194, 210, 57, 185, 11, 173,
+    ];
+    let from_signer = [
+        10, 0, 0, 0, 207, 102, 54, 207, 119, 68, 14, 137, 166, 125, 178, 54, 145, 238, 159, 172,
+        112, 219, 217, 47, 114, 80, 174, 155, 169, 67, 171, 189, 97, 230, 70, 18, 56, 208, 10, 77,
+        54, 147, 136, 75, 184, 2, 121, 112, 9, 109, 92, 103, 216, 233, 6, 152, 245, 99, 244, 212,
+        151, 79, 227, 173, 129, 192, 195, 2, 219, 2, 96, 190, 50, 68, 206, 251, 25, 237, 138, 247,
+        192, 64, 225, 129, 240, 160, 96, 157, 57, 134, 92, 204, 95, 67, 188, 176, 38, 11, 117, 44,
+        58, 128, 112, 179, 116, 175, 12, 91, 255, 85, 220, 200, 113, 120, 157, 158, 34, 77, 111,
+        158, 209, 7, 223, 7, 23, 88, 139, 104, 7, 151, 59, 211, 202, 161, 153, 182, 85, 183, 242,
+        235, 154, 212, 123, 115, 191, 218, 194, 210, 57, 185, 11, 173,
+    ];
+    let from_rust = [
+        10, 0, 0, 0, 225, 60, 94, 0, 188, 61, 241, 105, 33, 106, 127, 100, 23, 139, 10, 247, 168,
+        115, 252, 74, 111, 229, 5, 9, 196, 191, 0, 193, 176, 223, 117, 176, 250, 143, 144, 252, 13,
+        105, 40, 249, 53, 92, 167, 109, 253, 219, 233, 0, 215, 16, 53, 97, 66, 43, 168, 202, 22,
+        45, 171, 16, 222, 30, 132, 8, 219, 2, 96, 190, 50, 68, 206, 251, 25, 237, 138, 247, 192,
+        64, 225, 129, 240, 160, 96, 157, 57, 134, 92, 204, 95, 67, 188, 176, 38, 11, 117, 44, 58,
+        128, 112, 179, 116, 175, 12, 91, 255, 85, 220, 200, 113, 120, 157, 158, 34, 77, 111, 158,
+        209, 7, 223, 7, 23, 88, 139, 104, 7, 151, 59, 211, 202, 161, 153, 182, 85, 183, 242, 235,
+        154, 212, 123, 115, 191, 218, 194, 210, 57, 185, 11, 173,
+    ];
+    let bytes = from_signer;
+    let repair_peer_id = Pubkey::from([
+        58, 128, 112, 179, 116, 175, 12, 91, 255, 85, 220, 200, 113, 120, 157, 158, 34, 77, 111,
+        158, 209, 7, 223, 7, 23, 88, 139, 104, 7, 151, 59, 211,
+    ]);
+    let message: RepairProtocol = bincode::deserialize(&bytes).unwrap();
+    ServeRepair::verify_signed_packet(&repair_peer_id, &bytes, &message).unwrap();
 }
 
 impl RepairRequestHeader {
@@ -418,6 +556,7 @@ impl ServeRepair {
                     slot,
                     shred_index,
                 } => {
+                    error!("window index");
                     stats.window_index += 1;
                     let batch = Self::run_window_request(
                         recycler,
@@ -437,6 +576,7 @@ impl ServeRepair {
                     slot,
                     shred_index: highest_index,
                 } => {
+                    error!("highest window index");
                     stats.highest_window_index += 1;
                     (
                         Self::run_highest_window_request(
@@ -454,6 +594,7 @@ impl ServeRepair {
                     header: RepairRequestHeader { nonce, .. },
                     slot,
                 } => {
+                    error!("orphan");
                     stats.orphan += 1;
                     (
                         Self::run_orphan(
@@ -471,6 +612,7 @@ impl ServeRepair {
                     header: RepairRequestHeader { nonce, .. },
                     slot,
                 } => {
+                    error!("ancestor hashes");
                     stats.ancestor_hashes += 1;
                     (
                         Self::run_ancestor_hashes(recycler, from_addr, blockstore, *slot, *nonce),
@@ -478,6 +620,7 @@ impl ServeRepair {
                     )
                 }
                 RepairProtocol::Pong(pong) => {
+                    error!("pong");
                     stats.pong += 1;
                     ping_cache.add(pong, *from_addr, Instant::now());
                     (None, "Pong")
@@ -499,6 +642,7 @@ impl ServeRepair {
                 }
             }
         };
+        error!("handled.");
         Self::report_time_spent(label, &now.elapsed(), "");
         res
     }
@@ -952,7 +1096,7 @@ impl ServeRepair {
     ) {
         let identity_keypair = self.cluster_info.keypair().clone();
         let mut pending_pings = Vec::default();
-
+        error!("handling requests");
         for RepairRequestWithMeta {
             request,
             from_addr,
@@ -961,8 +1105,10 @@ impl ServeRepair {
             response_sender,
         } in requests.into_iter()
         {
+            // error!("================================== GOT REQUEST");
             if !data_budget.check(request.max_response_bytes()) {
                 stats.dropped_requests_outbound_bandwidth += 1;
+                // error!("skipping due to 1");
                 continue;
             }
             // Bypass ping/pong check for requests coming from QUIC endpoint.
@@ -970,19 +1116,29 @@ impl ServeRepair {
                 let (check, ping_pkt) =
                     Self::check_ping_cache(ping_cache, &request, &from_addr, &identity_keypair);
                 if let Some(ping_pkt) = ping_pkt {
+                    // ping_pkt.meta_mut().port = 8002;
+                    error!(
+                        "sending ping to: {}:{}",
+                        ping_pkt.meta().addr,
+                        ping_pkt.meta().port
+                    );
                     pending_pings.push(ping_pkt);
                 }
                 if !check {
                     stats.ping_cache_check_failed += 1;
+                    error!("skipping due to failed ping");
                     continue;
                 }
             }
             stats.processed += 1;
+            error!("==================================================================== HANDLING");
             let Some(rsp) =
                 Self::handle_repair(recycler, &from_addr, blockstore, request, stats, ping_cache)
             else {
+                error!("got nothing");
                 continue;
             };
+            error!("got some kind of message to send");
             let num_response_packets = rsp.len();
             let num_response_bytes = rsp.iter().map(|p| p.meta().size).sum();
             if data_budget.take(num_response_bytes)
@@ -1297,9 +1453,11 @@ impl ServeRepair {
         nonce: Nonce,
     ) -> Option<PacketBatch> {
         // Try to find the requested index in one of the slots
+        error!("looking for slot...");
         let meta = blockstore.meta(slot).ok()??;
         if meta.received > highest_index {
             // meta.received must be at least 1 by this point
+            error!("have some shreds");
             let packet = repair_response::repair_response_packet(
                 blockstore,
                 slot,
@@ -1313,6 +1471,7 @@ impl ServeRepair {
                 vec![packet],
             ));
         }
+        error!("no shreds for the slot");
         None
     }
 
