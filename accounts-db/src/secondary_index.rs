@@ -9,6 +9,7 @@ use {
             atomic::{AtomicU64, Ordering},
             RwLock,
         },
+        time::{SystemTime, UNIX_EPOCH},
     },
 };
 
@@ -38,32 +39,261 @@ pub struct DashMapSecondaryIndexEntry {
     account_keys: DashMap<Pubkey, ()>,
 }
 
+pub static READ: StatRecorder = StatRecorder::new();
+pub static INSERT: StatRecorder = StatRecorder::new();
+pub static REMOVE: StatRecorder = StatRecorder::new();
+pub static LEN: StatRecorder = StatRecorder::new();
+
+pub fn print_stats_loop(interval: u64) {
+    print_stats_loop_json(interval);
+}
+
+pub fn print_stats_loop_csv(interval: u64) {
+    let start = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    loop {
+        println!(
+            "{} - secondary index stats:",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                - start
+        );
+        println!("  operation,{}", StatSnapshot::csv_header());
+        println!("  READ,{}", READ.get_snapshot().csv());
+        println!("  INSERT,{}", INSERT.get_snapshot().csv());
+        println!("  REMOVE,{}", REMOVE.get_snapshot().csv());
+        println!("  LEN,{}", LEN.get_snapshot().csv());
+        std::thread::sleep(std::time::Duration::from_secs(interval));
+    }
+}
+
+pub fn print_stats_loop_json(interval: u64) {
+    let start = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    loop {
+        println!(
+            "{} - secondary index stats:",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                - start
+        );
+        // println!("  operation,{}", StatSnapshot::csv_header());
+        let summary = StatSummary {
+            timestamp: (now_nanos() / 1_000_000_000) as u64,
+            read: READ.get_snapshot(),
+            insert: INSERT.get_snapshot(),
+            remove: REMOVE.get_snapshot(),
+            len: LEN.get_snapshot(),
+        };
+        println!("{},", serde_json::to_string(&summary).unwrap());
+        std::thread::sleep(std::time::Duration::from_secs(interval));
+    }
+}
+
+pub struct StatRecorder {
+    read_lock: std::sync::Mutex<()>,
+    count_and_shard: AtomicU64,
+    shards: [StatShard; 2],
+}
+
+struct StatShard {
+    sum: AtomicU64,
+    count: AtomicU64,
+    max: AtomicU64,
+    min: AtomicU64,
+}
+
+impl StatShard {
+    pub const fn new() -> Self {
+        Self {
+            sum: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+            max: AtomicU64::new(0),
+            min: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    pub fn update_max(&self, x: u64) {
+        _ = self
+            .max
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                (x > old).then_some(x)
+            });
+    }
+
+    pub fn update_min(&self, x: u64) {
+        _ = self
+            .min
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                (x < old).then_some(x)
+            });
+    }
+}
+
+impl StatRecorder {
+    pub const fn new() -> Self {
+        Self {
+            read_lock: std::sync::Mutex::new(()),
+            count_and_shard: AtomicU64::new(0),
+            shards: [StatShard::new(), StatShard::new()],
+        }
+    }
+
+    pub fn get_snapshot(&self) -> StatSnapshot {
+        let lock = self.read_lock.lock();
+        let cas = self.count_and_shard.fetch_xor(1, Ordering::Acquire);
+        let shard = &self.shards[(cas % 2) as usize];
+        let count = cas >> 1;
+
+        while shard
+            .count
+            .compare_exchange_weak(count, 0, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {}
+
+        let sum = shard.sum.load(Ordering::Relaxed);
+        let max = shard.max.load(Ordering::Relaxed);
+        let min = shard.min.load(Ordering::Relaxed);
+
+        let other_shard = &self.shards[((cas + 1) % 2) as usize];
+        other_shard.count.fetch_add(count, Ordering::Relaxed);
+        other_shard.sum.fetch_add(sum, Ordering::Relaxed);
+        other_shard.update_max(max);
+        other_shard.update_min(min);
+
+        shard.count.store(0, Ordering::Relaxed);
+        shard.sum.store(0, Ordering::Relaxed);
+        shard.min.store(u64::MAX, Ordering::Relaxed);
+        shard.max.store(0, Ordering::Relaxed);
+
+        drop(lock);
+
+        StatSnapshot {
+            count,
+            sum,
+            max,
+            min,
+        }
+    }
+
+    pub fn record(&self, x: u64) {
+        let cas = self.count_and_shard.fetch_add(2, Ordering::Acquire);
+        let shard = &self.shards[(cas % 2) as usize];
+        shard.sum.fetch_add(x, Ordering::Relaxed);
+        shard.update_max(x);
+        shard.update_min(x);
+        shard.count.fetch_add(1, Ordering::Release);
+    }
+}
+
+#[derive(Serialize)]
+pub struct StatSummary {
+    timestamp: u64,
+    read: StatSnapshot,
+    insert: StatSnapshot,
+    remove: StatSnapshot,
+    len: StatSnapshot,
+}
+
+#[derive(Serialize)]
+pub struct StatSnapshot {
+    pub sum: u64,
+    pub count: u64,
+    pub min: u64,
+    pub max: u64,
+}
+
+impl StatSnapshot {
+    pub fn mean(&self) -> Option<u64> {
+        self.sum.checked_div(self.count)
+    }
+
+    pub fn json(&self) -> String {
+        serde_json::to_string(self).unwrap()
+    }
+
+    pub fn csv_header() -> String {
+        format!("mean,min,max,count")
+    }
+
+    pub fn csv(&self) -> String {
+        let string = |opt: Option<u64>| {
+            if let Some(x) = opt {
+                x.to_string()
+            } else {
+                "".to_owned()
+            }
+        };
+        format!(
+            "{},{},{},{}",
+            string(self.mean()),
+            string((self.count != 0).then_some(self.min)),
+            string((self.count != 0).then_some(self.max)),
+            self.count
+        )
+    }
+}
+
+fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+}
+
+fn record_duration(recorder: &StatRecorder, start_nanos: u128) {
+    recorder.record((now_nanos() - start_nanos).try_into().unwrap());
+}
+
 impl SecondaryIndexEntry for DashMapSecondaryIndexEntry {
     fn insert_if_not_exists(&self, key: &Pubkey, inner_keys_count: &AtomicU64) {
+        let start = now_nanos();
         if self.account_keys.get(key).is_none() {
             self.account_keys.entry(*key).or_insert_with(|| {
                 inner_keys_count.fetch_add(1, Ordering::Relaxed);
             });
         }
+        record_duration(&INSERT, start);
     }
 
     fn remove_inner_key(&self, key: &Pubkey) -> bool {
-        self.account_keys.remove(key).is_some()
+        let start = now_nanos();
+        let ret = self.account_keys.remove(key).is_some();
+        record_duration(&REMOVE, start);
+        ret
     }
 
     fn is_empty(&self) -> bool {
-        self.account_keys.is_empty()
+        let start = now_nanos();
+        let ret = self.account_keys.is_empty();
+        record_duration(&LEN, start);
+        ret
     }
 
     fn keys(&self) -> Vec<Pubkey> {
-        self.account_keys
+        let start = now_nanos();
+        let ret = self
+            .account_keys
             .iter()
             .map(|entry_ref| *entry_ref.key())
-            .collect()
+            .collect();
+        record_duration(&READ, start);
+        ret
     }
 
     fn len(&self) -> usize {
-        self.account_keys.len()
+        let start = now_nanos();
+        let ret = self.account_keys.len();
+        record_duration(&LEN, start);
+        ret
     }
 }
 
@@ -74,28 +304,42 @@ pub struct RwLockSecondaryIndexEntry {
 
 impl SecondaryIndexEntry for RwLockSecondaryIndexEntry {
     fn insert_if_not_exists(&self, key: &Pubkey, inner_keys_count: &AtomicU64) {
+        let start = now_nanos();
         let exists = self.account_keys.read().unwrap().contains(key);
         if !exists {
             let mut w_account_keys = self.account_keys.write().unwrap();
             w_account_keys.insert(*key);
             inner_keys_count.fetch_add(1, Ordering::Relaxed);
         };
+        INSERT.record((now_nanos() - start).try_into().unwrap());
     }
 
     fn remove_inner_key(&self, key: &Pubkey) -> bool {
-        self.account_keys.write().unwrap().remove(key)
+        let start = now_nanos();
+        let ret = self.account_keys.write().unwrap().remove(key);
+        REMOVE.record((now_nanos() - start).try_into().unwrap());
+        ret
     }
 
     fn is_empty(&self) -> bool {
-        self.account_keys.read().unwrap().is_empty()
+        let start = now_nanos();
+        let ret = self.account_keys.read().unwrap().is_empty();
+        LEN.record((now_nanos() - start).try_into().unwrap());
+        ret
     }
 
     fn keys(&self) -> Vec<Pubkey> {
-        self.account_keys.read().unwrap().iter().cloned().collect()
+        let start = now_nanos();
+        let ret = self.account_keys.read().unwrap().iter().cloned().collect();
+        READ.record((now_nanos() - start).try_into().unwrap());
+        ret
     }
 
     fn len(&self) -> usize {
-        self.account_keys.read().unwrap().len()
+        let start = now_nanos();
+        let ret = self.account_keys.read().unwrap().len();
+        LEN.record((now_nanos() - start).try_into().unwrap());
+        ret
     }
 }
 

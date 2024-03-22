@@ -501,6 +501,8 @@ impl Validator {
         tpu_enable_udp: bool,
         admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     ) -> Result<Self, String> {
+        std::thread::spawn(|| solana_accounts_db::secondary_index::print_stats_loop(10));
+
         let id = identity_keypair.pubkey();
         assert_eq!(&id, node.info.pubkey());
 
